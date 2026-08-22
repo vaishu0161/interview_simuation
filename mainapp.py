@@ -1,26 +1,27 @@
 """
-AI Interview Simulator — Base Prototype (Step 1-3)
+AI Interview Simulator — Prototype (Step 1-4)
 ----------------------------------------------------
-This is the foundation: text-based Q&A loop using Groq.
-Video, voice (gTTS), and Whisper transcription get added on top of this
-in later steps — this file proves the core AI question-generation
-logic works before anything else is layered in.
+Text-based Q&A loop using Groq, now with gTTS voice added so
+questions are spoken aloud instead of just displayed as text.
+Video and Whisper transcription get layered on top of this next.
 
 Setup:
-    pip install streamlit groq
+    pip install streamlit groq gTTS
 
 Run:
-    streamlit run interview_simulator_app.py
+    streamlit run mainapp.py
 
 You'll need a free Groq API key from https://console.groq.com
-Set it as an environment variable before running:
+Set it as an environment variable before running (or as a Streamlit secret):
     export GROQ_API_KEY="your_key_here"      (Mac/Linux)
     setx GROQ_API_KEY "your_key_here"         (Windows)
 """
 
+import io
 import os
 import streamlit as st
 from groq import Groq
+from gtts import gTTS
 
 # ---------- CONFIG ----------
 GROQ_MODEL = "openai/gpt-oss-20b"  # fast + good quality on Groq's free tier
@@ -47,6 +48,10 @@ if "history" not in st.session_state:
     st.session_state.history = []             # list of {"question": ..., "answer": ...}
 if "current_question" not in st.session_state:
     st.session_state.current_question = ""
+if "spoken_question" not in st.session_state:
+    st.session_state.spoken_question = ""      # tracks which question we've already voiced
+if "audio_bytes" not in st.session_state:
+    st.session_state.audio_bytes = None
 
 
 # ---------- GROQ HELPERS ----------
@@ -101,6 +106,16 @@ Keep it to a short paragraph plus a bullet list of suggestions."""
     return response.choices[0].message.content.strip()
 
 
+# ---------- VOICE HELPER ----------
+def text_to_speech(text: str) -> bytes:
+    """Convert text into spoken audio (in-memory, no temp files needed)."""
+    tts = gTTS(text=text, lang="en")
+    audio_buffer = io.BytesIO()
+    tts.write_to_fp(audio_buffer)
+    audio_buffer.seek(0)
+    return audio_buffer.read()
+
+
 # ---------- UI: SETUP STAGE ----------
 if st.session_state.stage == "setup":
     st.title("🎤 AI Interview Simulator")
@@ -112,6 +127,8 @@ if st.session_state.stage == "setup":
         st.session_state.role = role_input.strip()
         st.session_state.history = []
         st.session_state.current_question = generate_question(st.session_state.role, [])
+        st.session_state.spoken_question = ""
+        st.session_state.audio_bytes = None
         st.session_state.stage = "interview"
         st.rerun()
 
@@ -120,6 +137,14 @@ elif st.session_state.stage == "interview":
     q_num = len(st.session_state.history) + 1
     st.subheader(f"Question {q_num} of {MAX_QUESTIONS}")
     st.write(st.session_state.current_question)
+
+    # Only regenerate audio when the question actually changes —
+    # otherwise it would re-speak the same question on every rerun.
+    if st.session_state.spoken_question != st.session_state.current_question:
+        st.session_state.audio_bytes = text_to_speech(st.session_state.current_question)
+        st.session_state.spoken_question = st.session_state.current_question
+
+    st.audio(st.session_state.audio_bytes, format="audio/mp3", autoplay=True)
 
     answer = st.text_area("Your answer", key=f"answer_{q_num}")
 
@@ -156,4 +181,6 @@ elif st.session_state.stage == "feedback":
         st.session_state.stage = "setup"
         st.session_state.history = []
         st.session_state.current_question = ""
+        st.session_state.spoken_question = ""
+        st.session_state.audio_bytes = None
         st.rerun()
