@@ -33,13 +33,7 @@ MAX_QUESTIONS = 5  # fixed number of questions per session (keeps it predictable
 # ---------- SETUP ----------
 st.set_page_config(page_title="AI Interview Simulator", page_icon="🎤")
 
-try:
-    api_key = st.secrets.get("GROQ_API_KEY")
-except Exception:
-    api_key = None
-
-if not api_key:
-    api_key = os.environ.get("GROQ_API_KEY")
+api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 if not api_key:
     st.error("GROQ_API_KEY not found. Add GROQ_API_KEY to Streamlit Secrets or set it as an environment variable.")
     st.stop()
@@ -159,10 +153,71 @@ elif st.session_state.stage == "interview":
 
     st.audio(st.session_state.audio_bytes, format="audio/mp3", autoplay=True)
 
-    st.write("Look at the camera and answer, then capture a snapshot when you're done:")
-    captured = st.camera_input("Record your answer", key=f"camera_{q_num}")
-    if captured is not None:
-        st.session_state.recorded_video = captured
+    st.write("Record your answer on video, then upload the clip below:")
+
+    # Real in-browser video recording using plain JavaScript (MediaRecorder API).
+    # This needs NO server connection at all — recording happens entirely on
+    # your device, so there's no STUN/TURN/NAT issue. When you click "Stop",
+    # it automatically downloads the clip as a .webm file to your computer.
+    # You then upload that file just below to attach it to this answer.
+    st.components.v1.html(
+        """
+        <div style="font-family: sans-serif;">
+          <video id="preview" autoplay muted playsinline
+                 style="width:100%; max-width:480px; border-radius:8px; background:#000;"></video>
+          <br><br>
+          <button id="startBtn">🔴 Start Recording</button>
+          <button id="stopBtn" disabled>⏹ Stop & Download</button>
+          <p id="status" style="color:gray;"></p>
+        </div>
+        <script>
+        let mediaRecorder;
+        let chunks = [];
+        const preview = document.getElementById('preview');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const status = document.getElementById('status');
+
+        startBtn.onclick = async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            preview.srcObject = stream;
+            mediaRecorder = new MediaRecorder(stream);
+            chunks = [];
+            mediaRecorder.ondataavailable = e => chunks.push(e.data);
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'answer.webm';
+                a.click();
+                status.innerText = 'Downloaded! Now upload that file below.';
+                stream.getTracks().forEach(track => track.stop());
+            };
+            mediaRecorder.start();
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            status.innerText = 'Recording...';
+        };
+
+        stopBtn.onclick = () => {
+            mediaRecorder.stop();
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+        };
+        </script>
+        """,
+        height=420,
+    )
+
+    uploaded_clip = st.file_uploader(
+        "Upload your recorded answer.webm",
+        type=["webm", "mp4"],
+        key=f"upload_{q_num}",
+    )
+    if uploaded_clip is not None:
+        st.session_state.recorded_video = uploaded_clip
+        st.video(uploaded_clip)
 
     st.caption("Speech-to-text transcription of your spoken answer will be wired in next — for now, type your answer below.")
     answer = st.text_area("Your answer (temporary text input until Whisper is wired in)", key=f"answer_{q_num}")
