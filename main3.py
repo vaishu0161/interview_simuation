@@ -257,7 +257,14 @@ elif st.session_state.stage == "interview":
     if uploaded_clip is not None and st.session_state.recorded_video != uploaded_clip:
         st.session_state.recorded_video = uploaded_clip
         with st.spinner("Transcribing your answer..."):
-            st.session_state.transcribed_answer = transcribe_video(uploaded_clip)
+            transcript = transcribe_video(uploaded_clip)
+        st.session_state.transcribed_answer = transcript
+        # Streamlit text_area's `value=` argument is only used the FIRST time
+        # a widget with this key is created — once that key exists in
+        # session_state, later reruns ignore `value=` and keep whatever's
+        # already there. So we seed the key directly here, before the widget
+        # below gets created, to make the transcription actually show up.
+        st.session_state[f"answer_{q_num}"] = transcript
 
     if uploaded_clip is not None:
         st.video(uploaded_clip)
@@ -265,7 +272,6 @@ elif st.session_state.stage == "interview":
     st.caption("Transcribed automatically from your video — review and edit if needed before submitting.")
     answer = st.text_area(
         "Your answer",
-        value=st.session_state.transcribed_answer,
         key=f"answer_{q_num}",
     )
 
