@@ -30,6 +30,16 @@ import av
 GROQ_MODEL = "openai/gpt-oss-20b"  # fast + good quality on Groq's free tier
 MAX_QUESTIONS = 5  # fixed number of questions per session (keeps it predictable)
 
+# Public STUN server so the browser can establish a WebRTC connection.
+# Without this, the "Connection is taking longer than expected" error
+# shows up, especially once deployed (cloud servers have no camera of
+# their own and need help routing the browser's media stream).
+RTC_CONFIGURATION = {
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+    ]
+}
+
 # ---------- SETUP ----------
 st.set_page_config(page_title="AI Interview Simulator", page_icon="🎤")
 
@@ -168,6 +178,7 @@ elif st.session_state.stage == "interview":
         mode=WebRtcMode.SENDRECV,
         media_stream_constraints={"video": True, "audio": True},
         audio_frame_callback=audio_frame_callback,
+        rtc_configuration=RTC_CONFIGURATION,
     )
 
     st.caption("Transcription of your spoken answer will be wired in next — for now, type your answer below.")
