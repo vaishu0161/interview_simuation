@@ -26,7 +26,9 @@ Set it as an environment variable before running (or as a Streamlit secret):
     setx GROQ_API_KEY "your_key_here"         (Windows)
 """
 
+import base64
 import io
+import json
 import os
 import tempfile
 import streamlit as st
@@ -36,7 +38,7 @@ from gtts import gTTS
 
 # ---------- CONFIG ----------
 GROQ_MODEL = "openai/gpt-oss-20b"  # fast + good quality on Groq's free tier
-MAX_QUESTIONS = 2  # fixed number of questions per session (keeps it predictable)
+MAX_QUESTIONS = 5  # fixed number of questions per session (keeps it predictable)
 WHISPER_MODEL_SIZE = "base"  # small + fast enough for CPU, decent accuracy
 
 
@@ -75,6 +77,8 @@ if "recorded_video" not in st.session_state:
     st.session_state.recorded_video = None  # holds the uploaded video clip for the current question
 if "transcribed_answer" not in st.session_state:
     st.session_state.transcribed_answer = ""  # Whisper's transcription of the current answer
+if "reaction_audio" not in st.session_state:
+    st.session_state.reaction_audio = None  # spoken version of the last reaction
 
 
 # ---------- GROQ HELPERS ----------
@@ -129,6 +133,40 @@ Keep it to a short paragraph plus a bullet list of suggestions."""
     return response.choices[0].message.content.strip()
 
 
+def generate_reaction(role: str, question: str, answer: str) -> dict:
+    """Ask Groq to score this single answer (1-10) and give a short,
+    spoken-style reaction — this is what makes the interview feel live
+    and back-and-forth instead of silent until the very end."""
+    prompt = f"""You are a professional technical interviewer conducting a live interview.
+Candidate's target role: {role}
+
+You just asked: {question}
+The candidate answered: {answer}
+
+Respond with ONLY a JSON object in exactly this format, no other text:
+{{"score": <integer 1-10>, "reaction": "<one short, natural, spoken-style sentence reacting to this answer, as an interviewer would say out loud>"}}"""
+
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+    )
+    raw = response.choices[0].message.content.strip()
+
+    try:
+        # Models sometimes wrap JSON in ```json fences despite instructions —
+        # strip those before parsing.
+        cleaned = raw.replace("```json", "").replace("```", "").strip()
+        data = json.loads(cleaned)
+        score = int(data.get("score", 5))
+        reaction = str(data.get("reaction", "Thanks for that answer.")).strip()
+        score = max(1, min(10, score))  # clamp to 1-10 in case the model drifts
+        return {"score": score, "reaction": reaction}
+    except (json.JSONDecodeError, ValueError, TypeError):
+        # Fallback so a rare malformed response never crashes the app
+        return {"score": 5, "reaction": "Thanks for that answer, let's move on."}
+
+
 # ---------- VOICE HELPER ----------
 def text_to_speech(text: str) -> bytes:
     """Convert text into spoken audio (in-memory, no temp files needed)."""
@@ -137,6 +175,82 @@ def text_to_speech(text: str) -> bytes:
     tts.write_to_fp(audio_buffer)
     audio_buffer.seek(0)
     return audio_buffer.read()
+
+
+# ---------- AVATAR + SPEAKING INDICATOR ----------
+def render_avatar_with_speech(audio_bytes: bytes, unique_id: str, auto_advance: bool = False):
+    """Shows a simple SVG interviewer face with a glowing ring that pulses
+    exactly while the audio is playing, then goes still when it ends —
+    this is what gives the 'someone is actually talking to you' feel,
+    without needing real lip-sync (which isn't realistic to build for
+    free within this timeline).
+
+    If auto_advance=True, the moment the audio finishes, the browser
+    navigates itself (via a query param) so the app moves to the next
+    step with NO click needed — used after the AI's reaction, so the
+    interview keeps moving on its own once it's done talking."""
+    audio_b64 = base64.b64encode(audio_bytes).decode()
+    ended_message = "Waiting for your answer..." if not auto_advance else "Moving on..."
+    auto_advance_js = (
+        f'window.top.location.search = "?advance={unique_id}";'
+        if auto_advance else ""
+    )
+
+    st.components.v1.html(
+        f"""
+        <div style="font-family: sans-serif; text-align:center;">
+          <div id="avatar-{unique_id}" style="
+              width:140px; height:140px; margin:0 auto;
+              border-radius:50%; background:#2b2f38;
+              display:flex; align-items:center; justify-content:center;
+              transition: box-shadow 0.15s ease-in-out;
+          ">
+            <svg width="90" height="90" viewBox="0 0 100 100">
+              <circle cx="50" cy="38" r="20" fill="#e0c9a6"/>
+              <path d="M20 95 Q50 60 80 95 Z" fill="#4a5568"/>
+              <circle cx="42" cy="36" r="3" fill="#2b2f38"/>
+              <circle cx="58" cy="36" r="3" fill="#2b2f38"/>
+              <path d="M42 48 Q50 54 58 48" stroke="#2b2f38" stroke-width="2" fill="none" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <p id="status-{unique_id}" style="color:gray; margin-top:8px;">🔊 Speaking...</p>
+          <audio id="player-{unique_id}" autoplay style="display:none;">
+            <source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">
+          </audio>
+        </div>
+
+        <style>
+          @keyframes pulse-{unique_id} {{
+            0%   {{ box-shadow: 0 0 0 0 rgba(66, 153, 225, 0.6); }}
+            70%  {{ box-shadow: 0 0 0 18px rgba(66, 153, 225, 0); }}
+            100% {{ box-shadow: 0 0 0 0 rgba(66, 153, 225, 0); }}
+          }}
+          .talking-{unique_id} {{
+            animation: pulse-{unique_id} 1.1s infinite;
+          }}
+        </style>
+
+        <script>
+          const audioEl = document.getElementById("player-{unique_id}");
+          const avatarEl = document.getElementById("avatar-{unique_id}");
+          const statusEl = document.getElementById("status-{unique_id}");
+
+          audioEl.addEventListener("play", () => {{
+            avatarEl.classList.add("talking-{unique_id}");
+            statusEl.innerText = "🔊 Speaking...";
+          }});
+          audioEl.addEventListener("pause", () => {{
+            avatarEl.classList.remove("talking-{unique_id}");
+          }});
+          audioEl.addEventListener("ended", () => {{
+            avatarEl.classList.remove("talking-{unique_id}");
+            statusEl.innerText = "{ended_message}";
+            {auto_advance_js}
+          }});
+        </script>
+        """,
+        height=230,
+    )
 
 
 # ---------- TRANSCRIPTION HELPER ----------
@@ -178,6 +292,13 @@ if st.session_state.stage == "setup":
 # ---------- UI: INTERVIEW STAGE ----------
 elif st.session_state.stage == "interview":
     q_num = len(st.session_state.history) + 1
+
+    if st.session_state.history:
+        scores_so_far = [h["score"] for h in st.session_state.history if "score" in h]
+        if scores_so_far:
+            avg_score = sum(scores_so_far) / len(scores_so_far)
+            st.metric("Running score", f"{avg_score:.1f} / 10")
+
     st.subheader(f"Question {q_num} of {MAX_QUESTIONS}")
     st.write(st.session_state.current_question)
 
@@ -189,7 +310,7 @@ elif st.session_state.stage == "interview":
         st.session_state.recorded_video = None  # reset capture for the new question
         st.session_state.transcribed_answer = ""
 
-    st.audio(st.session_state.audio_bytes, format="audio/mp3", autoplay=True)
+    render_avatar_with_speech(st.session_state.audio_bytes, unique_id=f"q{q_num}")
 
     st.write("Record your answer on video, then upload the clip below:")
 
@@ -276,22 +397,65 @@ elif st.session_state.stage == "interview":
     )
 
     if st.button("Submit Answer", disabled=not answer.strip()):
+        with st.spinner("Evaluating your answer..."):
+            reaction_data = generate_reaction(
+                st.session_state.role, st.session_state.current_question, answer.strip()
+            )
+
         st.session_state.history.append({
             "question": st.session_state.current_question,
             "answer": answer.strip(),
+            "score": reaction_data["score"],
+            "reaction": reaction_data["reaction"],
         })
+        st.session_state.reaction_audio = text_to_speech(reaction_data["reaction"])
+        st.session_state.stage = "reacting"
+        st.rerun()
 
-        if len(st.session_state.history) >= MAX_QUESTIONS:
+# ---------- UI: REACTING STAGE (instant per-answer feedback) ----------
+elif st.session_state.stage == "reacting":
+    last = st.session_state.history[-1]
+    reaction_id = f"r{len(st.session_state.history)}"
+
+    st.subheader(f"Score: {last['score']} / 10")
+    st.write(last["reaction"])
+    render_avatar_with_speech(
+        st.session_state.reaction_audio, unique_id=reaction_id, auto_advance=True
+    )
+
+    is_last_question = len(st.session_state.history) >= MAX_QUESTIONS
+    button_label = "See Final Feedback" if is_last_question else "Next Question"
+
+    def _advance():
+        if is_last_question:
             st.session_state.stage = "feedback"
         else:
             st.session_state.current_question = generate_question(
                 st.session_state.role, st.session_state.history
             )
+            st.session_state.stage = "interview"
+
+    # The avatar's JS navigates to "?advance=<reaction_id>" the instant the
+    # reaction audio finishes — this catches that and moves on automatically,
+    # with NO click needed. The button below still works as a manual
+    # fallback (some browsers/embeds can block the JS navigation trick).
+    if st.query_params.get("advance") == reaction_id:
+        st.query_params.clear()
+        _advance()
+        st.rerun()
+
+    st.caption("Moving to the next step automatically once the AI finishes speaking...")
+    if st.button(button_label):
+        _advance()
         st.rerun()
 
 # ---------- UI: FEEDBACK STAGE ----------
 elif st.session_state.stage == "feedback":
     st.title("📋 Interview Feedback")
+
+    scores = [h["score"] for h in st.session_state.history if "score" in h]
+    if scores:
+        st.metric("Overall Score", f"{sum(scores) / len(scores):.1f} / 10")
 
     with st.spinner("Generating feedback..."):
         feedback = generate_feedback(st.session_state.role, st.session_state.history)
@@ -301,8 +465,11 @@ elif st.session_state.stage == "feedback":
     st.divider()
     st.subheader("Transcript")
     for i, h in enumerate(st.session_state.history, start=1):
-        st.markdown(f"**Q{i}: {h['question']}**")
+        score_suffix = f" — Score: {h['score']}/10" if "score" in h else ""
+        st.markdown(f"**Q{i}: {h['question']}**{score_suffix}")
         st.write(h["answer"])
+        if "reaction" in h:
+            st.caption(f"Interviewer reaction: {h['reaction']}")
 
     if st.button("Start New Interview"):
         st.session_state.stage = "setup"
@@ -311,4 +478,5 @@ elif st.session_state.stage == "feedback":
         st.session_state.spoken_question = ""
         st.session_state.audio_bytes = None
         st.session_state.recorded_video = None
+        st.session_state.reaction_audio = None
         st.rerun()
