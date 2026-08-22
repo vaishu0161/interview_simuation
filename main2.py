@@ -33,7 +33,13 @@ MAX_QUESTIONS = 5  # fixed number of questions per session (keeps it predictable
 # ---------- SETUP ----------
 st.set_page_config(page_title="AI Interview Simulator", page_icon="🎤")
 
-api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+try:
+    api_key = st.secrets.get("GROQ_API_KEY")
+except Exception:
+    api_key = None
+
+if not api_key:
+    api_key = os.environ.get("GROQ_API_KEY")
 if not api_key:
     st.error("GROQ_API_KEY not found. Add GROQ_API_KEY to Streamlit Secrets or set it as an environment variable.")
     st.stop()
