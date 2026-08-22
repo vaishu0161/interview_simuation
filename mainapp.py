@@ -23,15 +23,15 @@ import streamlit as st
 from groq import Groq
 
 # ---------- CONFIG ----------
-GROQ_MODEL = "llama-3.3-70b-versatile"  # fast + good quality on Groq's free tier
+GROQ_MODEL = "openai/gpt-oss-20b"  # fast + good quality on Groq's free tier
 MAX_QUESTIONS = 5  # fixed number of questions per session (keeps it predictable)
 
 # ---------- SETUP ----------
 st.set_page_config(page_title="AI Interview Simulator", page_icon="🎤")
 
-api_key = os.environ.get("GROQ_API_KEY")
+api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 if not api_key:
-    st.error("GROQ_API_KEY not found. Set it as an environment variable before running.")
+    st.error("GROQ_API_KEY not found. Add GROQ_API_KEY to Streamlit Secrets or set it as an environment variable.")
     st.stop()
 
 client = Groq(api_key=api_key)
