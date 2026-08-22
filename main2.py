@@ -1,22 +1,24 @@
 """
-AI Interview Simulator — Prototype (Step 1-5, revised again)
+AI Interview Simulator — Prototype (Step 1-5, working Streamlit version)
 ----------------------------------------------------
-Text-based Q&A loop using Groq + gTTS voice. Video recording uses a
-custom Streamlit component (video_recorder_component/index.html) that
-records in-browser via MediaRecorder and sends the finished clip
-straight back to Python — no download/upload step, and no live
-peer-to-peer connection, so no NAT/STUN-TURN issue like we hit with
-streamlit-webrtc.
+Text-based Q&A loop using Groq + gTTS voice, with per-answer video
+recording via plain-HTML MediaRecorder (records real video/audio in
+the browser, then you download the clip and upload it back in).
 
-IMPORTANT: the video_recorder_component/ folder (with its index.html)
-must sit in the same directory as this file, and both must be pushed
-to your GitHub repo together for this to work once deployed.
+We previously tried a custom Streamlit component (declare_component)
+that sent the recording straight to Python with no manual step, but
+that hit two platform limitations on Streamlit Community Cloud: the
+component's iframe blocked camera/mic permission, and its frontend
+files sometimes failed to load reliably once deployed ("trouble
+loading the main2.video_recorder component"). Neither is fixable from
+our code, so this version — confirmed to reliably open the camera and
+record real video — is the one to build on going forward.
 
 Setup:
     pip install streamlit groq gTTS
 
 Run:
-    streamlit run mainapp.py
+    streamlit run main2.py
 
 You'll need a free Groq API key from https://console.groq.com
 Set it as an environment variable before running (or as a Streamlit secret):
@@ -24,11 +26,9 @@ Set it as an environment variable before running (or as a Streamlit secret):
     setx GROQ_API_KEY "your_key_here"         (Windows)
 """
 
-import base64
 import io
 import os
 import streamlit as st
-import streamlit.components.v1 as components
 from groq import Groq
 from gtts import gTTS
 
@@ -46,19 +46,6 @@ if not api_key:
 
 client = Groq(api_key=api_key)
 
-# ---------- CUSTOM VIDEO RECORDER COMPONENT ----------
-# Points to the video_recorder_component/index.html folder sitting next
-# to this file. declare_component wires it up as a normal Streamlit
-# widget that returns whatever value the JS side sends back.
-_COMPONENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video_recorder_component")
-_video_recorder = components.declare_component("video_recorder", path=_COMPONENT_DIR)
-
-
-def record_video(key: str):
-    """Renders the recorder widget. Returns a base64 data URL string once
-    the user finishes recording, or None before that."""
-    return _video_recorder(key=key, default=None)
-
 # ---------- SESSION STATE ----------
 # session_state persists data across reruns (Streamlit reruns the whole
 # script on every interaction, so this is where we keep the conversation).
@@ -75,7 +62,7 @@ if "spoken_question" not in st.session_state:
 if "audio_bytes" not in st.session_state:
     st.session_state.audio_bytes = None
 if "recorded_video" not in st.session_state:
-    st.session_state.recorded_video = None  # holds the captured video/photo for the current question
+    st.session_state.recorded_video = None  # holds the uploaded video clip for the current question
 
 
 # ---------- GROQ HELPERS ----------
@@ -172,15 +159,72 @@ elif st.session_state.stage == "interview":
 
     st.audio(st.session_state.audio_bytes, format="audio/mp3", autoplay=True)
 
-    st.write("Record your answer on video — it sends straight through when you stop:")
+    st.write("Record your answer on video, then upload the clip below:")
 
-    video_data_url = record_video(key=f"rec_{q_num}")
-    if video_data_url:
-        # video_data_url looks like "data:video/webm;base64,AAAA...."
-        header, encoded = video_data_url.split(",", 1)
-        video_bytes = base64.b64decode(encoded)
-        st.session_state.recorded_video = video_bytes
-        st.video(video_bytes)
+    # Real in-browser video recording using plain JavaScript (MediaRecorder API).
+    # This needs NO server connection at all — recording happens entirely on
+    # your device, so there's no STUN/TURN/NAT issue, and this embedding method
+    # (st.components.v1.html) reliably gets camera permission, unlike the
+    # custom declare_component version we tried. When you click "Stop", it
+    # downloads the clip as a .webm file, which you then upload just below.
+    st.components.v1.html(
+        """
+        <div style="font-family: sans-serif;">
+          <video id="preview" autoplay muted playsinline
+                 style="width:100%; max-width:480px; border-radius:8px; background:#000;"></video>
+          <br><br>
+          <button id="startBtn">🔴 Start Recording</button>
+          <button id="stopBtn" disabled>⏹ Stop & Download</button>
+          <p id="status" style="color:gray;"></p>
+        </div>
+        <script>
+        let mediaRecorder;
+        let chunks = [];
+        const preview = document.getElementById('preview');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const status = document.getElementById('status');
+
+        startBtn.onclick = async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            preview.srcObject = stream;
+            mediaRecorder = new MediaRecorder(stream);
+            chunks = [];
+            mediaRecorder.ondataavailable = e => chunks.push(e.data);
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'answer.webm';
+                a.click();
+                status.innerText = 'Downloaded! Now upload that file below.';
+                stream.getTracks().forEach(track => track.stop());
+            };
+            mediaRecorder.start();
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            status.innerText = 'Recording...';
+        };
+
+        stopBtn.onclick = () => {
+            mediaRecorder.stop();
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+        };
+        </script>
+        """,
+        height=420,
+    )
+
+    uploaded_clip = st.file_uploader(
+        "Upload your recorded answer.webm",
+        type=["webm", "mp4"],
+        key=f"upload_{q_num}",
+    )
+    if uploaded_clip is not None:
+        st.session_state.recorded_video = uploaded_clip
+        st.video(uploaded_clip)
 
     st.caption("Speech-to-text transcription of your spoken answer will be wired in next — for now, type your answer below.")
     answer = st.text_area("Your answer (temporary text input until Whisper is wired in)", key=f"answer_{q_num}")
