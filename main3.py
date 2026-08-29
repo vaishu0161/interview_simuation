@@ -35,11 +35,42 @@ import streamlit as st
 import whisper
 from groq import Groq
 from gtts import gTTS
+from deep_translator import GoogleTranslator
 
 # ---------- CONFIG ----------
 GROQ_MODEL = "openai/gpt-oss-20b"  # fast + good quality on Groq's free tier
 MAX_QUESTIONS = 1  # fixed number of questions per session (keeps it predictable)
 WHISPER_MODEL_SIZE = "base"  # small + fast enough for CPU, decent accuracy
+
+# Display name -> language code. Codes work for both deep_translator
+# (Google Translate) and gTTS, so the same code drives both translation
+# and speech.
+LANGUAGES = {
+    "English": "en",
+    "Tamil": "ta",
+    "Hindi": "hi",
+    "Telugu": "te",
+    "Malayalam": "ml",
+    "Kannada": "kn",
+    "Bengali": "bn",
+    "Marathi": "mr",
+    "Gujarati": "gu",
+    "French": "fr",
+    "Spanish": "es",
+}
+
+
+def translate_text(text: str, target_lang_code: str) -> str:
+    """Translate text into the selected language via Google Translate
+    (through deep_translator, free, no API key needed). Falls back to the
+    original English text if translation fails for any reason, so a
+    translation hiccup never breaks the interview."""
+    if not text or target_lang_code == "en":
+        return text
+    try:
+        return GoogleTranslator(source="en", target=target_lang_code).translate(text)
+    except Exception:
+        return text
 
 
 @st.cache_resource
@@ -65,6 +96,8 @@ if "stage" not in st.session_state:
     st.session_state.stage = "setup"          # setup -> interview -> feedback
 if "role" not in st.session_state:
     st.session_state.role = ""
+if "language" not in st.session_state:
+    st.session_state.language = "en"  # language code chosen on the setup screen
 if "history" not in st.session_state:
     st.session_state.history = []             # list of {"question": ..., "answer": ...}
 if "current_question" not in st.session_state:
@@ -168,9 +201,15 @@ Respond with ONLY a JSON object in exactly this format, no other text:
 
 
 # ---------- VOICE HELPER ----------
-def text_to_speech(text: str) -> bytes:
-    """Convert text into spoken audio (in-memory, no temp files needed)."""
-    tts = gTTS(text=text, lang="en")
+def text_to_speech(text: str, lang_code: str = "en") -> bytes:
+    """Convert text into spoken audio (in-memory, no temp files needed).
+    lang_code should match the already-translated text passed in."""
+    try:
+        tts = gTTS(text=text, lang=lang_code)
+    except ValueError:
+        # gTTS doesn't support every language code — fall back to English
+        # speech rather than crashing the app.
+        tts = gTTS(text=text, lang="en")
     audio_buffer = io.BytesIO()
     tts.write_to_fp(audio_buffer)
     audio_buffer.seek(0)
@@ -277,11 +316,14 @@ if st.session_state.stage == "setup":
     st.write("Enter your target role or topic to begin a simulated interview.")
 
     role_input = st.text_input("Target role / topic", placeholder="e.g. Python Backend Developer")
+    language_name = st.selectbox("Language", options=list(LANGUAGES.keys()), index=0)
 
     if st.button("Start Interview", disabled=not role_input.strip()):
         st.session_state.role = role_input.strip()
+        st.session_state.language = LANGUAGES[language_name]
         st.session_state.history = []
-        st.session_state.current_question = generate_question(st.session_state.role, [])
+        first_question_en = generate_question(st.session_state.role, [])
+        st.session_state.current_question = first_question_en
         st.session_state.spoken_question = ""
         st.session_state.audio_bytes = None
         st.session_state.recorded_video = None
@@ -299,13 +341,17 @@ elif st.session_state.stage == "interview":
             avg_score = sum(scores_so_far) / len(scores_so_far)
             st.metric("Running score", f"{avg_score:.1f} / 10")
 
+    # current_question is kept in English internally (so Groq's context
+    # stays consistent) — translate it just for what the user sees/hears.
+    question_display = translate_text(st.session_state.current_question, st.session_state.language)
+
     st.subheader(f"Question {q_num} of {MAX_QUESTIONS}")
-    st.write(st.session_state.current_question)
+    st.write(question_display)
 
     # Only regenerate audio when the question actually changes —
     # otherwise it would re-speak the same question on every rerun.
     if st.session_state.spoken_question != st.session_state.current_question:
-        st.session_state.audio_bytes = text_to_speech(st.session_state.current_question)
+        st.session_state.audio_bytes = text_to_speech(question_display, st.session_state.language)
         st.session_state.spoken_question = st.session_state.current_question
         st.session_state.recorded_video = None  # reset capture for the new question
         st.session_state.transcribed_answer = ""
@@ -406,9 +452,10 @@ elif st.session_state.stage == "interview":
             "question": st.session_state.current_question,
             "answer": answer.strip(),
             "score": reaction_data["score"],
-            "reaction": reaction_data["reaction"],
+            "reaction": reaction_data["reaction"],  # kept in English for the transcript/Groq context
         })
-        st.session_state.reaction_audio = text_to_speech(reaction_data["reaction"])
+        reaction_display = translate_text(reaction_data["reaction"], st.session_state.language)
+        st.session_state.reaction_audio = text_to_speech(reaction_display, st.session_state.language)
         st.session_state.stage = "reacting"
         st.rerun()
 
@@ -418,7 +465,7 @@ elif st.session_state.stage == "reacting":
     reaction_id = f"r{len(st.session_state.history)}"
 
     st.subheader(f"Score: {last['score']} / 10")
-    st.write(last["reaction"])
+    st.write(translate_text(last["reaction"], st.session_state.language))
     render_avatar_with_speech(
         st.session_state.reaction_audio, unique_id=reaction_id, auto_advance=True
     )
@@ -459,8 +506,9 @@ elif st.session_state.stage == "feedback":
 
     with st.spinner("Generating feedback..."):
         feedback = generate_feedback(st.session_state.role, st.session_state.history)
+        feedback_display = translate_text(feedback, st.session_state.language)
 
-    st.write(feedback)
+    st.write(feedback_display)
 
     st.divider()
     st.subheader("Transcript")
@@ -479,4 +527,5 @@ elif st.session_state.stage == "feedback":
         st.session_state.audio_bytes = None
         st.session_state.recorded_video = None
         st.session_state.reaction_audio = None
+        st.session_state.language = "en"
         st.rerun()
