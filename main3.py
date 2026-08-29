@@ -38,7 +38,7 @@ from gtts import gTTS
 
 # ---------- CONFIG ----------
 GROQ_MODEL = "openai/gpt-oss-20b"  # fast + good quality on Groq's free tier
-MAX_QUESTIONS = 5  # fixed number of questions per session (keeps it predictable)
+MAX_QUESTIONS = 1  # fixed number of questions per session (keeps it predictable)
 WHISPER_MODEL_SIZE = "base"  # small + fast enough for CPU, decent accuracy
 
 
