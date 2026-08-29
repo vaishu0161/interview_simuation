@@ -341,17 +341,13 @@ elif st.session_state.stage == "interview":
             avg_score = sum(scores_so_far) / len(scores_so_far)
             st.metric("Running score", f"{avg_score:.1f} / 10")
 
-    # current_question is kept in English internally (so Groq's context
-    # stays consistent) — translate it just for what the user sees/hears.
-    question_display = translate_text(st.session_state.current_question, st.session_state.language)
-
     st.subheader(f"Question {q_num} of {MAX_QUESTIONS}")
-    st.write(question_display)
+    st.write(st.session_state.current_question)
 
     # Only regenerate audio when the question actually changes —
     # otherwise it would re-speak the same question on every rerun.
     if st.session_state.spoken_question != st.session_state.current_question:
-        st.session_state.audio_bytes = text_to_speech(question_display, st.session_state.language)
+        st.session_state.audio_bytes = text_to_speech(st.session_state.current_question)
         st.session_state.spoken_question = st.session_state.current_question
         st.session_state.recorded_video = None  # reset capture for the new question
         st.session_state.transcribed_answer = ""
@@ -421,6 +417,7 @@ elif st.session_state.stage == "interview":
         type=["webm", "mp4"],
         key=f"upload_{q_num}",
     )
+    st.write(f"DEBUG: uploaded_clip is {uploaded_clip}, recorded_video is {st.session_state.recorded_video}")
     if uploaded_clip is not None and st.session_state.recorded_video != uploaded_clip:
         st.session_state.recorded_video = uploaded_clip
         with st.spinner("Transcribing your answer..."):
@@ -452,10 +449,9 @@ elif st.session_state.stage == "interview":
             "question": st.session_state.current_question,
             "answer": answer.strip(),
             "score": reaction_data["score"],
-            "reaction": reaction_data["reaction"],  # kept in English for the transcript/Groq context
+            "reaction": reaction_data["reaction"],
         })
-        reaction_display = translate_text(reaction_data["reaction"], st.session_state.language)
-        st.session_state.reaction_audio = text_to_speech(reaction_display, st.session_state.language)
+        st.session_state.reaction_audio = text_to_speech(reaction_data["reaction"])
         st.session_state.stage = "reacting"
         st.rerun()
 
@@ -465,7 +461,7 @@ elif st.session_state.stage == "reacting":
     reaction_id = f"r{len(st.session_state.history)}"
 
     st.subheader(f"Score: {last['score']} / 10")
-    st.write(translate_text(last["reaction"], st.session_state.language))
+    st.write(last["reaction"])
     render_avatar_with_speech(
         st.session_state.reaction_audio, unique_id=reaction_id, auto_advance=True
     )
