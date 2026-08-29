@@ -434,6 +434,7 @@ elif st.session_state.stage == "interview":
         st.video(uploaded_clip)
 
     st.caption("Transcribed automatically from your video — review and edit if needed before submitting.")
+    st.write(f"DEBUG: session_state answer_{q_num} is {repr(st.session_state.get(f'answer_{q_num}', 'NOT SET'))}")
     answer = st.text_area(
         "Your answer",
         key=f"answer_{q_num}",
