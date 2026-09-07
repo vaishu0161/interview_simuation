@@ -39,10 +39,17 @@ from gtts import gTTS
 from deep_translator import GoogleTranslator
 
 # ---------- CONFIG ----------
+APP_NAME = "InterviewAI"
+APP_TAGLINE = "Practice smarter. Interview better."
 GROQ_MODEL = "openai/gpt-oss-20b"  # fast + good quality on Groq's free tier
-QUESTIONS_PER_INTERVIEW = 5  # how many questions the question bank draws per session
-MAX_QUESTIONS = QUESTIONS_PER_INTERVIEW  # kept as an alias so existing references below still work
+QUESTIONS_PER_INTERVIEW = 5  # default/fallback question count
 WHISPER_MODEL_SIZE = "base"  # small + fast enough for CPU, decent accuracy
+
+# ---------- SETUP-SCREEN OPTIONS ----------
+EXPERIENCE_LEVELS = ["Beginner", "Intermediate", "Advanced"]
+INTERVIEW_TYPES = ["Technical", "HR", "Behavioral", "Mixed"]
+QUESTION_COUNT_OPTIONS = [5, 10, 15]
+DIFFICULTY_LEVELS = ["Easy", "Medium", "Hard"]
 
 # ---------- PROCTORING CONFIG ----------
 MAX_ALLOWED_SCREEN_SWITCHES = 3       # tab/window switches tolerated before a warning is escalated
@@ -201,20 +208,32 @@ def _matching_technical_buckets(role: str) -> list:
     return list(buckets)
 
 
-def pick_interview_questions(role: str, n: int = QUESTIONS_PER_INTERVIEW) -> list:
+def pick_interview_questions(
+    role: str,
+    n: int = QUESTIONS_PER_INTERVIEW,
+    interview_type: str = "Mixed",
+    difficulty: str = "Medium",
+) -> list:
     """Randomly build a non-repeating set of n questions for this interview,
     mixing technical, behavioral, situational, and HR questions. Technical
-    questions are drawn from buckets relevant to the typed role/topic."""
+    questions are drawn from buckets relevant to the typed role/topic.
+
+    interview_type narrows the category mix ("Technical" / "HR" /
+    "Behavioral" / "Mixed"); "Behavioral" also pulls in situational
+    questions since they're closely related. difficulty is used as a soft
+    preference — matching questions are tried first, then the pool is
+    topped up with other difficulties so a short/niche role never comes up
+    short on questions."""
     pool = []
     for bucket in _matching_technical_buckets(role):
-        for text, difficulty in TECHNICAL_QUESTION_BANK.get(bucket, []):
-            pool.append({"text": text, "difficulty": difficulty, "category": "Technical"})
-    for text, difficulty in BEHAVIORAL_QUESTION_BANK:
-        pool.append({"text": text, "difficulty": difficulty, "category": "Behavioral"})
-    for text, difficulty in SITUATIONAL_QUESTION_BANK:
-        pool.append({"text": text, "difficulty": difficulty, "category": "Situational"})
-    for text, difficulty in HR_QUESTION_BANK:
-        pool.append({"text": text, "difficulty": difficulty, "category": "HR"})
+        for text, diff in TECHNICAL_QUESTION_BANK.get(bucket, []):
+            pool.append({"text": text, "difficulty": diff, "category": "Technical"})
+    for text, diff in BEHAVIORAL_QUESTION_BANK:
+        pool.append({"text": text, "difficulty": diff, "category": "Behavioral"})
+    for text, diff in SITUATIONAL_QUESTION_BANK:
+        pool.append({"text": text, "difficulty": diff, "category": "Situational"})
+    for text, diff in HR_QUESTION_BANK:
+        pool.append({"text": text, "difficulty": diff, "category": "HR"})
 
     # De-duplicate (a question could theoretically appear via multiple buckets)
     seen_texts = set()
@@ -224,8 +243,28 @@ def pick_interview_questions(role: str, n: int = QUESTIONS_PER_INTERVIEW) -> lis
             seen_texts.add(q["text"])
             unique_pool.append(q)
 
-    n = min(n, len(unique_pool))
-    return random.sample(unique_pool, n)
+    # Narrow by interview type first.
+    if interview_type == "Technical":
+        typed_pool = [q for q in unique_pool if q["category"] == "Technical"]
+    elif interview_type == "HR":
+        typed_pool = [q for q in unique_pool if q["category"] == "HR"]
+    elif interview_type == "Behavioral":
+        typed_pool = [q for q in unique_pool if q["category"] in ("Behavioral", "Situational")]
+    else:  # "Mixed"
+        typed_pool = unique_pool
+    if not typed_pool:  # safety net if a narrow filter leaves nothing
+        typed_pool = unique_pool
+
+    # Prefer the requested difficulty, then fill any remaining slots from
+    # the rest of the (type-filtered) pool so we always return n questions.
+    preferred = [q for q in typed_pool if q["difficulty"] == difficulty]
+    remaining = [q for q in typed_pool if q["difficulty"] != difficulty]
+    random.shuffle(preferred)
+    random.shuffle(remaining)
+    ordered = preferred + remaining
+
+    n = min(n, len(ordered))
+    return ordered[:n]
 
 
 def translate_text(text: str, target_lang_code: str) -> str:
@@ -248,7 +287,97 @@ def load_whisper_model():
     return whisper.load_model(WHISPER_MODEL_SIZE)
 
 # ---------- SETUP ----------
-st.set_page_config(page_title="AI Interview Simulator", page_icon="🎤")
+st.set_page_config(page_title=f"{APP_NAME} — AI Interview Simulator", page_icon="🎤", layout="wide")
+
+
+def inject_theme():
+    """Global CSS for a clean, professional SaaS-style look. Pure CSS only —
+    no extra Python packages — so it can't introduce a deployment problem."""
+    st.markdown(
+        """
+        <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        .block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1100px;}
+
+        .ia-navbar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0.6rem 0 1.4rem 0; border-bottom: 1px solid #e7e9ee; margin-bottom: 1.6rem;
+        }
+        .ia-navbar .ia-logo {
+            font-size: 1.35rem; font-weight: 800; color: #1a1f36; letter-spacing: -0.02em;
+        }
+        .ia-navbar .ia-logo span { color: #4f46e5; }
+        .ia-badge {
+            background: #eef2ff; color: #4338ca; padding: 4px 12px; border-radius: 999px;
+            font-size: 0.78rem; font-weight: 600;
+        }
+
+        .ia-hero {
+            text-align: center; padding: 2.2rem 1rem 1.4rem 1rem;
+        }
+        .ia-hero h1 {
+            font-size: 2.6rem; font-weight: 800; color: #111827; margin-bottom: 0.4rem; letter-spacing: -0.03em;
+        }
+        .ia-hero h1 span { color: #4f46e5; }
+        .ia-hero p.tagline {
+            font-size: 1.25rem; font-weight: 600; color: #4f46e5; margin-bottom: 0.6rem;
+        }
+        .ia-hero p.desc {
+            font-size: 1.02rem; color: #4b5563; max-width: 640px; margin: 0 auto 1.6rem auto; line-height: 1.55;
+        }
+
+        .ia-card {
+            background: #ffffff; border: 1px solid #eceef2; border-radius: 16px;
+            padding: 1.4rem 1.3rem; height: 100%;
+            box-shadow: 0 1px 3px rgba(16, 24, 40, 0.04);
+            transition: box-shadow 0.15s ease, transform 0.15s ease;
+        }
+        .ia-card:hover { box-shadow: 0 6px 18px rgba(16, 24, 40, 0.08); transform: translateY(-2px); }
+        .ia-card .ia-icon { font-size: 1.7rem; margin-bottom: 0.5rem; }
+        .ia-card h4 { font-size: 1.02rem; font-weight: 700; color: #1a1f36; margin: 0 0 0.3rem 0; }
+        .ia-card p { font-size: 0.9rem; color: #667085; margin: 0; line-height: 1.45; }
+
+        .ia-stat { text-align: center; padding: 0.6rem 0; }
+        .ia-stat .ia-stat-num { font-size: 1.9rem; font-weight: 800; color: #4f46e5; }
+        .ia-stat .ia-stat-label { font-size: 0.85rem; color: #667085; font-weight: 500; }
+
+        .ia-summary {
+            background: #f8f9fc; border: 1px solid #eceef2; border-radius: 14px;
+            padding: 1.1rem 1.3rem; margin: 0.8rem 0 1.2rem 0;
+        }
+        .ia-summary h4 { margin-top: 0; color: #1a1f36; }
+        .ia-summary .ia-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.92rem; }
+        .ia-summary .ia-row b { color: #1a1f36; }
+
+        div.stButton > button {
+            border-radius: 10px; font-weight: 600; padding: 0.55rem 1.4rem;
+        }
+        div.stButton > button[kind="primary"] {
+            background: #4f46e5; border-color: #4f46e5;
+        }
+        div.stButton > button[kind="primary"]:hover {
+            background: #4338ca; border-color: #4338ca;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_navbar(subtitle: str = ""):
+    st.markdown(
+        f"""
+        <div class="ia-navbar">
+            <div class="ia-logo">Interview<span>AI</span></div>
+            <div class="ia-badge">{subtitle or "AI Mock Interview Platform"}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_theme()
 
 api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 if not api_key:
@@ -261,11 +390,19 @@ client = Groq(api_key=api_key)
 # session_state persists data across reruns (Streamlit reruns the whole
 # script on every interaction, so this is where we keep the conversation).
 if "stage" not in st.session_state:
-    st.session_state.stage = "setup"          # setup -> interview -> feedback
+    st.session_state.stage = "landing"        # landing -> setup -> interview -> feedback
 if "role" not in st.session_state:
     st.session_state.role = ""
 if "language" not in st.session_state:
     st.session_state.language = "en"  # language code chosen on the setup screen
+if "experience_level" not in st.session_state:
+    st.session_state.experience_level = "Intermediate"
+if "interview_type" not in st.session_state:
+    st.session_state.interview_type = "Mixed"
+if "difficulty" not in st.session_state:
+    st.session_state.difficulty = "Medium"
+if "num_questions" not in st.session_state:
+    st.session_state.num_questions = QUESTIONS_PER_INTERVIEW
 if "history" not in st.session_state:
     st.session_state.history = []             # list of {"question": ..., "answer": ...}
 if "current_question" not in st.session_state:
@@ -469,10 +606,20 @@ def render_avatar_with_speech(audio_bytes: bytes, unique_id: str, auto_advance: 
     # Piggyback the client-side proctoring event log (kept on window.top by
     # render_proctoring_system) onto this same navigation, so it reaches
     # Python without needing a separate round trip.
+    # Wrapped in try/catch: this component runs inside a sandboxed iframe,
+    # and browsers can block a script-driven (non-click) top-level
+    # navigation from such a frame, especially if the tab has lost focus
+    # (e.g. the candidate switched tabs). Without this guard, that block
+    # surfaces as an uncaught JS error. The manual button below the
+    # avatar is the fallback if auto-advance can't fire for that reason.
     auto_advance_js = (
         """
-        var __events = (window.top.__proctorState && window.top.__proctorState.events) ? window.top.__proctorState.events : [];
-        window.top.location.search = "?advance=""" + unique_id + """&pevents=" + encodeURIComponent(JSON.stringify(__events));
+        try {
+            var __events = (window.top.__proctorState && window.top.__proctorState.events) ? window.top.__proctorState.events : [];
+            window.top.location.search = "?advance=""" + unique_id + """&pevents=" + encodeURIComponent(JSON.stringify(__events));
+        } catch (e) {
+            console.warn("Auto-advance navigation blocked; use the manual button instead.", e);
+        }
         """
         if auto_advance else ""
     )
@@ -575,6 +722,17 @@ def render_proctoring_system():
         f"""
         <script>
         (function() {{
+            // If this frame can't safely reach the top window (blocked by
+            // browser sandboxing — e.g. the app is embedded elsewhere, or a
+            // popup/new-tab context) bail out quietly instead of throwing.
+            // An uncaught error here previously bubbled up as a visible
+            // page error whenever a new tab/page was opened during the
+            // interview.
+            try {{ void window.top.document; }} catch (e) {{
+                console.warn("Proctoring disabled: top window is not accessible from this frame.", e);
+                return;
+            }}
+
             const MAX_SWITCHES = {MAX_ALLOWED_SCREEN_SWITCHES};
             const FACE_MISSING_MS = {FACE_MISSING_THRESHOLD_MS};
             const GAZE_MS = {GAZE_AWAY_THRESHOLD_MS};
@@ -583,6 +741,12 @@ def render_proctoring_system():
 
             if (window.top.__proctorInit) return;  // already running, nothing to do
             window.top.__proctorInit = true;
+            window.top.addEventListener("error", function(evt) {{
+                // Swallow errors from this proctoring layer so a detection
+                // glitch (e.g. a CDN model failing to load) never shows up
+                // as a page-level error to the candidate.
+                console.warn("Proctoring script error (ignored):", evt.message);
+            }});
             window.top.__proctorState = {{
                 events: [], screenSwitches: 0, startTime: Date.now(),
                 faceAbsentSince: null, multiFaceSince: null, lookAwaySince: null,
@@ -764,7 +928,11 @@ def render_fullscreen_consent_prompt():
         <script>
         document.getElementById('fsBtn').onclick = function() {
             try { window.top.document.documentElement.requestFullscreen(); } catch (e) {}
-            window.top.location.search = "?fsack=1";
+            try {
+                window.top.location.search = "?fsack=1";
+            } catch (e) {
+                console.warn("Could not update the top window's URL; continuing without fullscreen ack.", e);
+            }
         };
         </script>
         """,
@@ -772,16 +940,109 @@ def render_fullscreen_consent_prompt():
     )
 
 
+# ---------- UI: LANDING STAGE ----------
+if st.session_state.stage == "landing":
+    render_navbar()
+
+    st.markdown(
+        f"""
+        <div class="ia-hero">
+            <h1>Interview<span>AI</span></h1>
+            <p class="tagline">{APP_TAGLINE}</p>
+            <p class="desc">
+                A realistic, AI-powered mock interview platform. Pick a role, answer on camera,
+                and get instant, structured feedback on your technical depth, communication, and
+                confidence — just like a real interview panel would give you.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    _, mid, _ = st.columns([1, 1, 1])
+    with mid:
+        if st.button("🚀 Start Interview", use_container_width=True, type="primary"):
+            st.session_state.stage = "setup"
+            st.rerun()
+
+    st.write("")
+    st.write("")
+
+    feature_cols = st.columns(4)
+    features = [
+        ("🧠", "AI-Powered Questions", "Role-aware technical, HR, and behavioral questions generated for your target job."),
+        ("🎥", "Video Interview", "Answer on camera through your browser, just like a real virtual interview."),
+        ("🛡️", "Real-Time Monitoring", "Lightweight, transparent proctoring flags tab switches and attention shifts."),
+        ("📊", "Performance Feedback", "Get scored on technical depth, communication, confidence, and relevance."),
+    ]
+    for col, (icon, title, desc) in zip(feature_cols, features):
+        with col:
+            st.markdown(
+                f"""
+                <div class="ia-card">
+                    <div class="ia-icon">{icon}</div>
+                    <h4>{title}</h4>
+                    <p>{desc}</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.write("")
+    st.write("")
+
+    stat_cols = st.columns(4)
+    stats = [
+        ("11", "Languages Supported"),
+        ("4", "Interview Types"),
+        ("5–15", "Questions per Session"),
+        ("100%", "Browser-Based, No Install"),
+    ]
+    for col, (num, label) in zip(stat_cols, stats):
+        with col:
+            st.markdown(
+                f"""
+                <div class="ia-stat">
+                    <div class="ia-stat-num">{num}</div>
+                    <div class="ia-stat-label">{label}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
 # ---------- UI: SETUP STAGE ----------
-if st.session_state.stage == "setup":
-    st.title("🎤 AI Interview Simulator")
-    st.write("Enter your target role or topic to begin a simulated interview.")
+elif st.session_state.stage == "setup":
+    render_navbar("Interview Setup")
+    st.markdown("### Set up your mock interview")
+    st.caption("Configure the interview to match the role you're preparing for, then review the summary and start.")
 
-    role_input = st.text_input("Target role / topic", placeholder="e.g. Python Backend Developer")
-    language_name = st.selectbox("Language", options=list(LANGUAGES.keys()), index=0)
+    col1, col2 = st.columns(2)
+    with col1:
+        role_input = st.text_input("🎯 Target role / topic", placeholder="e.g. Python Backend Developer")
+        interview_type = st.selectbox("🗂️ Interview type", options=INTERVIEW_TYPES, index=INTERVIEW_TYPES.index(st.session_state.interview_type))
+        num_questions = st.select_slider("🔢 Number of questions", options=QUESTION_COUNT_OPTIONS, value=st.session_state.num_questions)
+    with col2:
+        experience_level = st.selectbox("📈 Experience level", options=EXPERIENCE_LEVELS, index=EXPERIENCE_LEVELS.index(st.session_state.experience_level))
+        language_name = st.selectbox("🌐 Language", options=list(LANGUAGES.keys()), index=0)
+        difficulty = st.select_slider("⚙️ Difficulty", options=DIFFICULTY_LEVELS, value=st.session_state.difficulty)
 
-    st.divider()
-    st.markdown("**Proctoring & privacy notice**")
+    if role_input.strip():
+        st.markdown(
+            f"""
+            <div class="ia-summary">
+                <h4>📋 Interview Summary</h4>
+                <div class="ia-row"><span>Role / Topic</span><b>{role_input.strip()}</b></div>
+                <div class="ia-row"><span>Experience Level</span><b>{experience_level}</b></div>
+                <div class="ia-row"><span>Interview Type</span><b>{interview_type}</b></div>
+                <div class="ia-row"><span>Number of Questions</span><b>{num_questions}</b></div>
+                <div class="ia-row"><span>Language</span><b>{language_name}</b></div>
+                <div class="ia-row"><span>Difficulty</span><b>{difficulty}</b></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("**🛡️ Proctoring & privacy notice**")
     st.caption(
         "This interview uses your camera and microphone for recording and for automated "
         "proctoring (checking that your face is visible, that you stay on this screen, and "
@@ -797,31 +1058,42 @@ if st.session_state.stage == "setup":
     )
     st.session_state.consent_given = consent
 
-    if st.button("Start Interview", disabled=not (role_input.strip() and consent)):
-        st.session_state.role = role_input.strip()
-        st.session_state.language = LANGUAGES[language_name]
-        st.session_state.history = []
-        st.session_state.question_queue = pick_interview_questions(
-            st.session_state.role, QUESTIONS_PER_INTERVIEW
-        )
-        first_question = (
-            st.session_state.question_queue.pop(0)["text"]
-            if st.session_state.question_queue
-            else generate_question(st.session_state.role, [])
-        )
-        st.session_state.current_question = first_question
-        st.session_state.spoken_question = ""
-        st.session_state.audio_bytes = None
-        st.session_state.recorded_video = None
-        st.session_state.transcribed_answer = ""
-        st.session_state.proctor_log = []
-        st.session_state.fullscreen_prompt_shown = False
-        st.session_state.switch_limit_warned = False
-        st.session_state.stage = "interview"
-        st.rerun()
+    back_col, start_col = st.columns([1, 3])
+    with back_col:
+        if st.button("← Back"):
+            st.session_state.stage = "landing"
+            st.rerun()
+    with start_col:
+        if st.button("Start Interview →", disabled=not (role_input.strip() and consent), type="primary"):
+            st.session_state.role = role_input.strip()
+            st.session_state.language = LANGUAGES[language_name]
+            st.session_state.experience_level = experience_level
+            st.session_state.interview_type = interview_type
+            st.session_state.difficulty = difficulty
+            st.session_state.num_questions = num_questions
+            st.session_state.history = []
+            st.session_state.question_queue = pick_interview_questions(
+                st.session_state.role, num_questions, interview_type, difficulty
+            )
+            first_question = (
+                st.session_state.question_queue.pop(0)["text"]
+                if st.session_state.question_queue
+                else generate_question(st.session_state.role, [])
+            )
+            st.session_state.current_question = first_question
+            st.session_state.spoken_question = ""
+            st.session_state.audio_bytes = None
+            st.session_state.recorded_video = None
+            st.session_state.transcribed_answer = ""
+            st.session_state.proctor_log = []
+            st.session_state.fullscreen_prompt_shown = False
+            st.session_state.switch_limit_warned = False
+            st.session_state.stage = "interview"
+            st.rerun()
 
 # ---------- UI: INTERVIEW STAGE ----------
 elif st.session_state.stage == "interview":
+    render_navbar(f"{st.session_state.role or 'Interview'} · {st.session_state.interview_type}")
     q_num = len(st.session_state.history) + 1
 
     # Fullscreen requires a genuine click, so handle its ack before anything else.
@@ -850,7 +1122,7 @@ elif st.session_state.stage == "interview":
             avg_score = sum(scores_so_far) / len(scores_so_far)
             st.metric("Running score", f"{avg_score:.1f} / 10")
 
-    st.subheader(f"Question {q_num} of {MAX_QUESTIONS}")
+    st.subheader(f"Question {q_num} of {st.session_state.num_questions}")
     st.write(st.session_state.current_question)
 
     # Only regenerate audio when the question actually changes —
@@ -926,7 +1198,6 @@ elif st.session_state.stage == "interview":
         type=["webm", "mp4"],
         key=f"upload_{q_num}",
     )
-    st.write(f"DEBUG: uploaded_clip is {uploaded_clip}, recorded_video is {st.session_state.recorded_video}")
     if uploaded_clip is not None and st.session_state.recorded_video != uploaded_clip:
         st.session_state.recorded_video = uploaded_clip
         with st.spinner("Transcribing your answer..."):
@@ -943,7 +1214,6 @@ elif st.session_state.stage == "interview":
         st.video(uploaded_clip)
 
     st.caption("Transcribed automatically from your video — review and edit if needed before submitting.")
-    st.write(f"DEBUG: session_state answer_{q_num} is {repr(st.session_state.get(f'answer_{q_num}', 'NOT SET'))}")
     answer = st.text_area(
         "Your answer",
         key=f"answer_{q_num}",
@@ -976,7 +1246,7 @@ elif st.session_state.stage == "reacting":
         st.session_state.reaction_audio, unique_id=reaction_id, auto_advance=True
     )
 
-    is_last_question = len(st.session_state.history) >= MAX_QUESTIONS
+    is_last_question = len(st.session_state.history) >= st.session_state.num_questions
     button_label = "See Final Feedback" if is_last_question else "Next Question"
 
     def _advance():
@@ -1023,6 +1293,7 @@ elif st.session_state.stage == "reacting":
 
 # ---------- UI: FEEDBACK STAGE ----------
 elif st.session_state.stage == "feedback":
+    render_navbar("Interview Report")
     st.title("📋 Interview Feedback")
 
     with st.spinner("Generating your interview report..."):
@@ -1083,8 +1354,9 @@ elif st.session_state.stage == "feedback":
         if "reaction" in h:
             st.caption(f"Interviewer reaction: {h['reaction']}")
 
-    if st.button("Start New Interview"):
-        st.session_state.stage = "setup"
+    restart_col, home_col = st.columns(2)
+
+    def _reset_for_new_session():
         st.session_state.history = []
         st.session_state.current_question = ""
         st.session_state.spoken_question = ""
@@ -1102,4 +1374,14 @@ elif st.session_state.stage == "feedback":
         # running (see render_proctoring_system's guard) until the page is
         # reloaded; that's a known limitation of the no-custom-component
         # approach this app uses.
-        st.rerun()
+
+    with restart_col:
+        if st.button("🔁 Start New Interview", type="primary", use_container_width=True):
+            _reset_for_new_session()
+            st.session_state.stage = "setup"
+            st.rerun()
+    with home_col:
+        if st.button("🏠 Back to Home", use_container_width=True):
+            _reset_for_new_session()
+            st.session_state.stage = "landing"
+            st.rerun()
