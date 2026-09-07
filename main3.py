@@ -39,7 +39,7 @@ from deep_translator import GoogleTranslator
 
 # ---------- CONFIG ----------
 GROQ_MODEL = "openai/gpt-oss-20b"  # fast + good quality on Groq's free tier
-MAX_QUESTIONS = 1  # fixed number of questions per session (keeps it predictable)
+MAX_QUESTIONS = 3  # fixed number of questions per session (keeps it predictable)
 WHISPER_MODEL_SIZE = "base"  # small + fast enough for CPU, decent accuracy
 
 # Display name -> language code. Codes work for both deep_translator
