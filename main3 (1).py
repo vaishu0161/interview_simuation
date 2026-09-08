@@ -15,7 +15,11 @@ our code, so this version — confirmed to reliably open the camera and
 record real video — is the one to build on going forward.
 
 Setup:
-    pip install streamlit groq gTTS
+    pip install streamlit>=1.32 groq gTTS openai-whisper deep-translator
+    # Whisper also needs the ffmpeg binary on your system PATH:
+    #   Mac:     brew install ffmpeg
+    #   Ubuntu:  sudo apt install ffmpeg
+    #   Windows: winget install ffmpeg   (or download from ffmpeg.org)
 
 Run:
     streamlit run main2.py
@@ -24,6 +28,17 @@ You'll need a free Groq API key from https://console.groq.com
 Set it as an environment variable before running (or as a Streamlit secret):
     export GROQ_API_KEY="your_key_here"      (Mac/Linux)
     setx GROQ_API_KEY "your_key_here"         (Windows)
+
+Note on "no other tabs" / proctoring lockdown:
+    No website JavaScript can truly prevent a person from opening a new
+    browser tab, switching apps, or using Alt+Tab — that control belongs
+    to the browser/OS, not the page. What this file does instead is the
+    strongest thing actually achievable from a web page: it detects a
+    tab switch the instant it happens, can end the interview immediately
+    in "Strict mode", requests fullscreen + (where the browser supports
+    it) Keyboard Lock to swallow common shortcuts, and warns before the
+    tab is closed/reloaded. Treat this as a deterrent + audit trail, not
+    an unbreakable lock.
 """
 
 import base64
@@ -52,7 +67,8 @@ QUESTION_COUNT_OPTIONS = [5, 10, 15]
 DIFFICULTY_LEVELS = ["Easy", "Medium", "Hard"]
 
 # ---------- PROCTORING CONFIG ----------
-MAX_ALLOWED_SCREEN_SWITCHES = 3       # tab/window switches tolerated before a warning is escalated
+DEFAULT_STRICT_MODE = True            # if True, leaving the tab even once ends the interview immediately
+MAX_ALLOWED_SCREEN_SWITCHES = 3       # (non-strict mode only) switches tolerated before a warning is escalated
 FACE_MISSING_THRESHOLD_MS = 5000      # how long a face must be absent before it's logged
 GAZE_AWAY_THRESHOLD_MS = 4000         # how long attention must be turned away before it's logged
 MULTI_FACE_THRESHOLD_MS = 2000        # how long multiple faces must persist before it's logged
@@ -409,6 +425,8 @@ if "current_question" not in st.session_state:
     st.session_state.current_question = ""
 if "spoken_question" not in st.session_state:
     st.session_state.spoken_question = ""      # tracks which question we've already voiced
+if "translated_question" not in st.session_state:
+    st.session_state.translated_question = ""  # question text in the selected display language
 if "audio_bytes" not in st.session_state:
     st.session_state.audio_bytes = None
 if "recorded_video" not in st.session_state:
@@ -427,6 +445,12 @@ if "fullscreen_prompt_shown" not in st.session_state:
     st.session_state.fullscreen_prompt_shown = False
 if "switch_limit_warned" not in st.session_state:
     st.session_state.switch_limit_warned = False
+if "strict_mode" not in st.session_state:
+    st.session_state.strict_mode = DEFAULT_STRICT_MODE
+if "disqualified" not in st.session_state:
+    st.session_state.disqualified = False
+if "disqualify_reason" not in st.session_state:
+    st.session_state.disqualify_reason = ""
 
 
 # ---------- GROQ HELPERS ----------
@@ -700,7 +724,7 @@ def transcribe_video(uploaded_file) -> str:
 
 
 # ---------- PROCTORING SYSTEM ----------
-def render_proctoring_system():
+def render_proctoring_system(strict_mode: bool = False):
     """Injects a persistent proctoring overlay + monitoring logic into the
     TOP browser window (not this disposable iframe). Streamlit reruns
     recreate this component's iframe on every interaction, but window.top
@@ -738,7 +762,12 @@ def render_proctoring_system():
             const GAZE_MS = {GAZE_AWAY_THRESHOLD_MS};
             const MULTI_FACE_MS = {MULTI_FACE_THRESHOLD_MS};
             const PHONE_COOLDOWN_MS = {PHONE_DETECT_COOLDOWN_MS};
+            const STRICT_MODE = {"true" if strict_mode else "false"};
 
+            // Re-run every mount so a strict-mode change (e.g. a fresh
+            // interview started with a different setting) takes effect,
+            // but never install the heavy camera/model-loading logic twice.
+            window.top.__proctorStrictMode = STRICT_MODE;
             if (window.top.__proctorInit) return;  // already running, nothing to do
             window.top.__proctorInit = true;
             window.top.addEventListener("error", function(evt) {{
@@ -750,8 +779,24 @@ def render_proctoring_system():
             window.top.__proctorState = {{
                 events: [], screenSwitches: 0, startTime: Date.now(),
                 faceAbsentSince: null, multiFaceSince: null, lookAwaySince: null,
-                phoneLastSeen: 0, stream: null
+                phoneLastSeen: 0, stream: null, hiddenAt: null, violationSent: false
             }};
+
+            // Best-effort deterrents. None of these can stop a determined
+            // person from opening another tab (that's outside any page's
+            // control) — they only raise friction and record intent.
+            window.top.addEventListener('beforeunload', function(e) {{
+                e.preventDefault();
+                e.returnValue = '';
+            }});
+            doc.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
+            doc.addEventListener('keydown', function(e) {{
+                const blockCombo = (e.key === 'F12') ||
+                    (e.ctrlKey && e.shiftKey && ['I', 'J', 'C'].includes(e.key)) ||
+                    (e.ctrlKey && e.key === 'u') ||
+                    (e.metaKey && e.altKey && ['I', 'J', 'C'].includes(e.key));
+                if (blockCombo) e.preventDefault();
+            }});
 
             const doc = window.top.document;
             const overlay = doc.createElement('div');
@@ -798,10 +843,26 @@ def render_proctoring_system():
             }});
 
             // ---- tab / window switch detection (Page Visibility API) ----
+            // We can only observe two moments: the instant this tab is
+            // hidden, and the instant it becomes visible again. There is no
+            // way to act *while* hidden (the page isn't running), so in
+            // strict mode the violation is reported as soon as the
+            // candidate comes back — that's the earliest this page can
+            // possibly know or do anything about it.
             doc.addEventListener('visibilitychange', function() {{
+                const st_ = window.top.__proctorState;
                 if (doc.hidden) {{
-                    window.top.__proctorState.screenSwitches += 1;
+                    st_.screenSwitches += 1;
+                    st_.hiddenAt = Date.now();
                     addEvent('Tab switched', 'Medium', 'Candidate switched tabs or minimized the window');
+                }} else if (st_.hiddenAt && STRICT_MODE && !st_.violationSent) {{
+                    st_.violationSent = true;
+                    try {{
+                        window.top.location.search = "?violation=1&pevents=" +
+                            encodeURIComponent(JSON.stringify(st_.events));
+                    }} catch (e) {{
+                        console.warn("Could not report strict-mode violation.", e);
+                    }}
                 }}
             }});
 
@@ -926,8 +987,22 @@ def render_fullscreen_consent_prompt():
                   background:#e53e3e;color:white;cursor:pointer;">Enter Fullscreen &amp; Begin</button>
         </div>
         <script>
-        document.getElementById('fsBtn').onclick = function() {
-            try { window.top.document.documentElement.requestFullscreen(); } catch (e) {}
+        document.getElementById('fsBtn').onclick = async function() {
+            try {
+                await window.top.document.documentElement.requestFullscreen();
+                // Keyboard Lock can swallow shortcuts like Alt+Tab/Cmd+Tab
+                // while in fullscreen, but only in Chromium browsers over
+                // HTTPS, and only if the browser/OS allows it — it is not
+                // guaranteed to work, and it never blocks clicking another
+                // window or app directly.
+                if (navigator.keyboard && navigator.keyboard.lock) {
+                    try { await navigator.keyboard.lock(); } catch (e) {
+                        console.warn("Keyboard lock unavailable.", e);
+                    }
+                }
+            } catch (e) {
+                console.warn("Fullscreen request failed or was denied.", e);
+            }
             try {
                 window.top.location.search = "?fsack=1";
             } catch (e) {
@@ -939,6 +1014,27 @@ def render_fullscreen_consent_prompt():
         height=140,
     )
 
+
+# ---------- GLOBAL: strict-mode violation handler ----------
+# The proctoring script (see render_proctoring_system) navigates the top
+# window to "?violation=1&pevents=..." the moment the candidate returns to
+# a tab they switched away from, if strict mode is on. This is checked
+# before anything else is rendered so the interview ends immediately,
+# regardless of which stage the candidate was on when it fired.
+if st.query_params.get("violation") == "1" and st.session_state.stage in ("interview", "reacting"):
+    raw_events = st.query_params.get("pevents")
+    if raw_events:
+        try:
+            st.session_state.proctor_log = json.loads(raw_events)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    st.session_state.disqualified = True
+    st.session_state.disqualify_reason = (
+        "Strict mode is on and the interview tab was switched away from or minimized."
+    )
+    st.session_state.stage = "feedback"
+    st.query_params.clear()
+    st.rerun()
 
 # ---------- UI: LANDING STAGE ----------
 if st.session_state.stage == "landing":
@@ -1049,8 +1145,15 @@ elif st.session_state.stage == "setup":
         "that no unauthorized materials are visible). We can only detect that you left the "
         "interview window, never what site or app you switched to. Face/gaze/phone checks "
         "run in your browser and flag possible issues for review — they don't make final "
-        "accusations. Switching tabs or leaving fullscreen will be logged but will not end "
-        f"the interview unless you exceed {MAX_ALLOWED_SCREEN_SWITCHES} switches."
+        "accusations. No web page can truly stop a browser from opening another tab; "
+        "'Strict mode' below is the closest practical substitute — it ends the interview the "
+        "moment you switch away, instead of only logging it."
+    )
+    strict_mode = st.checkbox(
+        "🔒 Strict mode — end the interview immediately if I switch tabs or minimize the window "
+        "(otherwise, switches are just logged, up to "
+        f"{MAX_ALLOWED_SCREEN_SWITCHES} before a warning).",
+        value=st.session_state.strict_mode,
     )
     consent = st.checkbox(
         "I consent to camera/microphone recording and automated proctoring for this interview.",
@@ -1071,6 +1174,9 @@ elif st.session_state.stage == "setup":
             st.session_state.interview_type = interview_type
             st.session_state.difficulty = difficulty
             st.session_state.num_questions = num_questions
+            st.session_state.strict_mode = strict_mode
+            st.session_state.disqualified = False
+            st.session_state.disqualify_reason = ""
             st.session_state.history = []
             st.session_state.question_queue = pick_interview_questions(
                 st.session_state.role, num_questions, interview_type, difficulty
@@ -1082,6 +1188,7 @@ elif st.session_state.stage == "setup":
             )
             st.session_state.current_question = first_question
             st.session_state.spoken_question = ""
+            st.session_state.translated_question = ""
             st.session_state.audio_bytes = None
             st.session_state.recorded_video = None
             st.session_state.transcribed_answer = ""
@@ -1101,7 +1208,7 @@ elif st.session_state.stage == "interview":
         st.session_state.fullscreen_prompt_shown = True
         st.query_params.clear()
 
-    render_proctoring_system()  # no-ops after first mount (guarded via window.top.__proctorInit)
+    render_proctoring_system(strict_mode=st.session_state.strict_mode)  # no-ops after first mount
 
     if not st.session_state.fullscreen_prompt_shown:
         render_fullscreen_consent_prompt()
@@ -1123,16 +1230,22 @@ elif st.session_state.stage == "interview":
             st.metric("Running score", f"{avg_score:.1f} / 10")
 
     st.subheader(f"Question {q_num} of {st.session_state.num_questions}")
-    st.write(st.session_state.current_question)
 
-    # Only regenerate audio when the question actually changes —
-    # otherwise it would re-speak the same question on every rerun.
+    # Only re-translate/regenerate audio when the question actually changes —
+    # otherwise every rerun (e.g. while typing in the answer box) would fire
+    # a translation API call and re-synthesize speech for no reason.
     if st.session_state.spoken_question != st.session_state.current_question:
-        st.session_state.audio_bytes = text_to_speech(st.session_state.current_question)
+        st.session_state.translated_question = translate_text(
+            st.session_state.current_question, st.session_state.language
+        )
+        st.session_state.audio_bytes = text_to_speech(
+            st.session_state.translated_question, st.session_state.language
+        )
         st.session_state.spoken_question = st.session_state.current_question
         st.session_state.recorded_video = None  # reset capture for the new question
         st.session_state.transcribed_answer = ""
 
+    st.write(st.session_state.translated_question)
     render_avatar_with_speech(st.session_state.audio_bytes, unique_id=f"q{q_num}")
 
     st.write("Record your answer on video, then upload the clip below:")
@@ -1225,13 +1338,14 @@ elif st.session_state.stage == "interview":
                 st.session_state.role, st.session_state.current_question, answer.strip()
             )
 
+        reaction_display = translate_text(reaction_data["reaction"], st.session_state.language)
         st.session_state.history.append({
             "question": st.session_state.current_question,
             "answer": answer.strip(),
             "score": reaction_data["score"],
-            "reaction": reaction_data["reaction"],
+            "reaction": reaction_display,
         })
-        st.session_state.reaction_audio = text_to_speech(reaction_data["reaction"])
+        st.session_state.reaction_audio = text_to_speech(reaction_display, st.session_state.language)
         st.session_state.stage = "reacting"
         st.rerun()
 
@@ -1288,6 +1402,12 @@ elif st.session_state.stage == "reacting":
 
     st.caption("Moving to the next step automatically once the AI finishes speaking...")
     if st.button(button_label):
+        # Bug fix: this manual fallback previously skipped _sync_proctor_log(),
+        # so proctoring events for this stretch were silently dropped whenever
+        # someone clicked through instead of waiting for auto-advance. It's
+        # still a no-op if the browser hasn't navigated with ?pevents= yet,
+        # but calling it keeps both paths consistent.
+        _sync_proctor_log()
         _advance()
         st.rerun()
 
@@ -1295,6 +1415,22 @@ elif st.session_state.stage == "reacting":
 elif st.session_state.stage == "feedback":
     render_navbar("Interview Report")
     st.title("📋 Interview Feedback")
+
+    if st.session_state.disqualified:
+        st.error(
+            "⛔ Interview ended early — " + st.session_state.disqualify_reason +
+            f" You answered {len(st.session_state.history)} question(s) before this happened; "
+            "the report below only covers those."
+        )
+
+    if not st.session_state.history:
+        st.info("No answers were recorded, so there's no report to generate.")
+        if st.button("🏠 Back to Home"):
+            st.session_state.stage = "landing"
+            st.session_state.disqualified = False
+            st.session_state.disqualify_reason = ""
+            st.rerun()
+        st.stop()
 
     with st.spinner("Generating your interview report..."):
         report = generate_final_report(st.session_state.role, st.session_state.history)
@@ -1360,6 +1496,7 @@ elif st.session_state.stage == "feedback":
         st.session_state.history = []
         st.session_state.current_question = ""
         st.session_state.spoken_question = ""
+        st.session_state.translated_question = ""
         st.session_state.audio_bytes = None
         st.session_state.recorded_video = None
         st.session_state.reaction_audio = None
@@ -1368,6 +1505,8 @@ elif st.session_state.stage == "feedback":
         st.session_state.proctor_log = []
         st.session_state.fullscreen_prompt_shown = False
         st.session_state.switch_limit_warned = False
+        st.session_state.disqualified = False
+        st.session_state.disqualify_reason = ""
         # Note: consent_given is intentionally NOT reset — re-consent isn't
         # required to start a new session in the same browser tab. Also, the
         # window.top proctoring overlay from the previous interview keeps
